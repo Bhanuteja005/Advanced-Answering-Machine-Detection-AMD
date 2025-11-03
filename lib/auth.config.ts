@@ -7,19 +7,29 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { PrismaClient } from "@prisma/client";
 
-// Prisma client singleton for serverless environments
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
+// Create Prisma client for serverless environments
+const createPrismaClient = () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  // Add parameters to disable prepared statements for serverless
+  const url = databaseUrl?.includes('?')
+    ? `${databaseUrl}&pgbouncer=true&connect_timeout=15`
+    : `${databaseUrl}?pgbouncer=true&connect_timeout=15`;
+
+  return new PrismaClient({
+    datasources: {
+      db: {
+        url,
+      },
+    },
+    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+  });
 };
 
-const prisma = globalForPrisma.prisma ?? new PrismaClient({
-  datasources: {
-    db: {
-      url: process.env.DATABASE_URL,
-    },
-  },
-  log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
-});
+// For development, use singleton to avoid connection issues
+// For production (serverless), create new instance per request
+const prisma = process.env.NODE_ENV === 'production'
+  ? createPrismaClient()
+  : (globalForPrisma.prisma ?? createPrismaClient());
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
