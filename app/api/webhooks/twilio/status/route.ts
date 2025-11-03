@@ -71,45 +71,48 @@ export async function POST(request: NextRequest) {
     let status = callStatus.toLowerCase();
     let amdResult = callLog.amdResult;
 
-    // Process AMD result if available
-    if (answeredBy) {
-      switch (answeredBy.toLowerCase()) {
-        case 'human':
-          amdResult = 'human';
-          break;
-        case 'machine':
-        case 'machine_start':
-        case 'machine_end_beep':
-        case 'machine_end_silence':
-        case 'machine_end_other':
-          amdResult = 'machine';
-          break;
-        case 'fax':
-        case 'unknown':
-        default:
-          amdResult = 'undecided';
-          break;
+    // Prepare update data
+    const updateData: any = {
+      status,
+      rawEvents: [...((callLog.rawEvents as any[]) || []), params],
+      updatedAt: new Date(),
+    };
+
+    // Process AMD result if available (only for Twilio native strategy)
+    if (answeredBy && callLog.strategy === 'twilio') {
+      const answeredByLower = answeredBy.toLowerCase();
+      
+      // Keep the detailed result from Twilio
+      amdResult = answeredByLower;
+      updateData.amdResult = amdResult;
+      
+      // Calculate confidence based on result type
+      let confidence = 0.80; // Default confidence
+      
+      if (answeredByLower === 'human') {
+        confidence = 0.85; // High confidence for human
+      } else if (answeredByLower === 'machine_start' || answeredByLower === 'machine_end_beep') {
+        confidence = 0.90; // Very high confidence for machine
+      } else if (answeredByLower === 'fax') {
+        confidence = 0.95; // Very high confidence for fax
+      } else if (answeredByLower === 'unknown') {
+        confidence = 0.50; // Low confidence for unknown
       }
+      
+      updateData.confidence = confidence;
+      
       logger.info('AMD result processed', {
         callSid,
         answeredBy,
         amdResult,
+        confidence,
       });
     }
-
-    // Get existing raw events or initialize
-    const existingEvents = (callLog.rawEvents as any[]) || [];
-    const updatedEvents = [...existingEvents, params];
 
     // Update call log
     await prisma.callLog.update({
       where: { id: callLog.id },
-      data: {
-        status,
-        amdResult,
-        rawEvents: updatedEvents,
-        updatedAt: new Date(),
-      },
+      data: updateData,
     });
 
     logger.info('Call log updated', {

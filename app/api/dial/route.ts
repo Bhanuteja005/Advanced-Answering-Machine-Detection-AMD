@@ -116,8 +116,8 @@ export async function POST(request: NextRequest) {
         let callParams: any = {
           to: validatedData.phone,
           from: TWILIO_FROM_NUMBER,
-          machineDetection: 'Enable',
-          machineDetectionTimeout: 5,
+          machineDetection: 'DetectMessageEnd',
+          machineDetectionTimeout: 30,
         };
 
         // If using ngrok or production, use URL callback
@@ -353,14 +353,142 @@ export async function POST(request: NextRequest) {
         // Strategy #4: Jambonz SIP AMD
         logger.info('Using Jambonz SIP AMD strategy');
         
-        return NextResponse.json(
-          { 
-            error: 'Jambonz not implemented',
-            message: 'Jambonz SIP AMD requires account setup. See documentation for details.',
-            documentation: 'https://docs.jambonz.org/'
-          },
-          { status: 501 }
-        );
+        const jambonzAccountSid = process.env.JAMBONZ_ACCOUNT_SID;
+        const jambonzApiKey = process.env.JAMBONZ_API_KEY;
+        const jambonzRestApiUrl = process.env.JAMBONZ_REST_API_URL;
+        const jambonzSipDomain = process.env.JAMBONZ_SIP_DOMAIN;
+        
+        if (!jambonzAccountSid || !jambonzApiKey || !jambonzRestApiUrl || !jambonzSipDomain) {
+          return NextResponse.json(
+            { 
+              error: 'Jambonz not configured',
+              message: 'Missing Jambonz credentials. Check JAMBONZ_ACCOUNT_SID, JAMBONZ_API_KEY, JAMBONZ_REST_API_URL, and JAMBONZ_SIP_DOMAIN environment variables.',
+              required: {
+                JAMBONZ_ACCOUNT_SID: !!jambonzAccountSid,
+                JAMBONZ_API_KEY: !!jambonzApiKey,
+                JAMBONZ_REST_API_URL: !!jambonzRestApiUrl,
+                JAMBONZ_SIP_DOMAIN: !!jambonzSipDomain,
+              }
+            },
+            { status: 503 }
+          );
+        }
+
+        try {
+          // Check if Application SID is configured
+          const jambonzApplicationSid = process.env.JAMBONZ_APPLICATION_SID;
+          
+          if (!jambonzApplicationSid) {
+            return NextResponse.json(
+              { 
+                error: 'Jambonz Application not configured',
+                message: 'You need to create an Application in Jambonz Console and set JAMBONZ_APPLICATION_SID in your .env file.',
+                steps: [
+                  '1. Go to https://portal.jambonz.cloud/applications',
+                  '2. Create a new Application',
+                  '3. Copy the Application SID',
+                  '4. Add JAMBONZ_APPLICATION_SID=your-app-sid to .env',
+                  '5. Restart your server'
+                ]
+              },
+              { status: 503 }
+            );
+          }
+          
+          // Determine webhook URL
+          const baseUrl = process.env.TWILIO_CALLBACK_BASE_URL || `${protocol}://${hostHeader}`;
+          const webhookUrl = `${baseUrl}/api/webhooks/jambonz/call`;
+          
+          // Create Jambonz call using REST API
+          // Using the correct Jambonz API format
+          const jambonzCallData = {
+            application_sid: jambonzApplicationSid,
+            from: TWILIO_FROM_NUMBER, // Your DID number
+            to: {
+              type: 'phone',
+              number: validatedData.phone
+            },
+            call_hook: {
+              url: webhookUrl,
+              method: 'POST'
+            },
+            tag: {
+              callLogId: callLog.id,
+              userId: user.id,
+              strategy: 'jambonz'
+            }
+          };
+
+          logger.info('Creating Jambonz call', { 
+            url: `${jambonzRestApiUrl}/v1/Accounts/${jambonzAccountSid}/Calls`,
+            webhookUrl,
+            phone: validatedData.phone,
+            applicationSid: jambonzApplicationSid
+          });
+
+          const jambonzResponse = await fetch(
+            `${jambonzRestApiUrl}/v1/Accounts/${jambonzAccountSid}/Calls`,
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${jambonzApiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(jambonzCallData),
+            }
+          );
+
+          if (!jambonzResponse.ok) {
+            const errorData = await jambonzResponse.text();
+            logger.error('Jambonz API error', { 
+              status: jambonzResponse.status, 
+              error: errorData 
+            });
+            return NextResponse.json(
+              { 
+                error: 'Jambonz call failed',
+                message: `Failed to create Jambonz call: ${jambonzResponse.statusText}`,
+                details: errorData
+              },
+              { status: jambonzResponse.status }
+            );
+          }
+
+          const callData = await jambonzResponse.json();
+          const callSid = callData.sid || callData.call_sid;
+
+          // Update call log
+          await prisma.callLog.update({
+            where: { id: callLog.id },
+            data: {
+              twilioSid: callSid,
+              status: 'initiated',
+            },
+          });
+
+          logger.info('Jambonz call created successfully', {
+            callLogId: callLog.id,
+            callSid,
+          });
+
+          return NextResponse.json({
+            success: true,
+            callLogId: callLog.id,
+            callSid,
+            strategy: 'jambonz',
+            message: 'Call initiated via Jambonz SIP. AMD detection will be performed by Jambonz.',
+          });
+
+        } catch (error) {
+          logger.error('Jambonz error', { error });
+          return NextResponse.json(
+            { 
+              error: 'Jambonz error',
+              message: error instanceof Error ? error.message : 'Unknown error creating Jambonz call'
+            },
+            { status: 500 }
+          );
+        }
       }
 
       default: {

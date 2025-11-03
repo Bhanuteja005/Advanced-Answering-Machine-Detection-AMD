@@ -9,7 +9,7 @@ interface DialFormProps {
 
 export default function DialForm({ onSuccess }: DialFormProps) {
   const [phone, setPhone] = useState('');
-  const [strategy, setStrategy] = useState<'twilio' | 'twilio-stream' | 'huggingface' | 'gemini' | 'jambonz'>('twilio');
+  const [strategy, setStrategy] = useState<'twilio' | 'huggingface' | 'gemini' | 'jambonz'>('twilio');
   const [connectOnHuman, setConnectOnHuman] = useState(false);
   const queryClient = useQueryClient();
 
@@ -84,18 +84,16 @@ export default function DialForm({ onSuccess }: DialFormProps) {
         <select
           id="strategy"
           value={strategy}
-          onChange={(e) => setStrategy(e.target.value as 'twilio' | 'twilio-stream' | 'huggingface' | 'gemini' | 'jambonz')}
+          onChange={(e) => setStrategy(e.target.value as 'twilio' | 'huggingface' | 'gemini' | 'jambonz')}
           className="mt-2 block w-full rounded-md border border-zinc-300 px-3 py-2 text-zinc-900 focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
         >
           <option value="twilio">1️⃣ Twilio Native AMD</option>
-          <option value="twilio-stream">1️⃣A Twilio + Media Streams (Real-time)</option>
           <option value="huggingface">2️⃣ Hugging Face (wav2vec)</option>
           <option value="gemini">3️⃣ Google Gemini Flash</option>
           <option value="jambonz">4️⃣ Jambonz SIP AMD</option>
         </select>
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           {strategy === 'twilio' && 'Fast, built-in detection (~1-2s)'}
-          {strategy === 'twilio-stream' && 'Real-time audio streaming with live detection (~2-3s, requires public URL)'}
           {strategy === 'huggingface' && 'ML-based audio analysis (~2-5s, requires Python service)'}
           {strategy === 'gemini' && 'AI-powered detection using Gemini (~3-6s)'}
           {strategy === 'jambonz' && 'SIP-based detection via Jambonz (~2-4s, requires SIP trunk)'}
@@ -152,6 +150,31 @@ export default function DialForm({ onSuccess }: DialFormProps) {
                     Verify Phone Number in Twilio
                     <svg className="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  </a>
+                </div>
+              )}
+              {(dialMutation.error.message.includes('Jambonz') || dialMutation.error.message.includes('jambonz') || dialMutation.error.message.includes('Application')) && (
+                <div className="mt-3 space-y-2">
+                  <div className="text-sm text-red-700 dark:text-red-300">
+                    <strong>Quick Fix:</strong>
+                    <ol className="list-decimal ml-4 mt-1 space-y-1">
+                      <li>Go to <a href="https://portal.jambonz.cloud/applications" target="_blank" rel="noopener noreferrer" className="underline">Jambonz Applications</a></li>
+                      <li>Create a new Application</li>
+                      <li>Copy the Application SID</li>
+                      <li>Add <code className="bg-red-900/30 px-1 py-0.5 rounded">JAMBONZ_APPLICATION_SID=your-sid</code> to .env</li>
+                      <li>Restart your server</li>
+                    </ol>
+                  </div>
+                  <a
+                    href="https://github.com/Bhanuteja005/Advanced-Answering-Machine-Detection-AMD/blob/master/JAMBONZ_QUICK_START.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                  >
+                    View Complete Setup Guide
+                    <svg className="ml-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                   </a>
                 </div>

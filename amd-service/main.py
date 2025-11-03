@@ -1,169 +1,262 @@
 """
-Hugging Face AMD Service
-Uses wav2vec2 model for answering machine detection
+Simplified Hugging Face AMD Service (without PyTorch)
+Uses audio signal processing heuristics for AMD detection
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import torch
-import torchaudio
-from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2Processor
-import numpy as np
-import io
 from pydantic import BaseModel
-from typing import Optional
+import numpy as np
+import wave
+import io
+import time
 import logging
-import os
+import base64
+from pydub import AudioSegment
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AMD Hugging Face Service", version="1.0.0")
+app = FastAPI(title="AMD Hugging Face Service (Simplified)", version="1.0.0")
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Model configuration
-MODEL_NAME = "facebook/wav2vec2-base"  # Base model
-SAMPLE_RATE = 16000
-MAX_DURATION = 10  # Maximum audio duration in seconds
-
-class AudioProcessor:
-    """Processes audio for AMD detection"""
-    
-    def __init__(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {self.device}")
-        
-        # For demo purposes, we'll use a simpler heuristic-based approach
-        # In production, you'd fine-tune wav2vec2 on AMD dataset
-        self.sample_rate = SAMPLE_RATE
-        
-    def analyze_audio_features(self, waveform: torch.Tensor) -> dict:
-        """
-        Analyze audio features to detect human vs machine
-        Uses heuristics based on audio characteristics
-        """
-        # Convert to mono if stereo
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
-        
-        # Calculate features
-        duration = waveform.shape[1] / self.sample_rate
-        
-        # Energy analysis
-        energy = torch.sum(waveform ** 2).item()
-        avg_energy = energy / waveform.shape[1]
-        
-        # Zero crossing rate (indicates speech variability)
-        zero_crossings = torch.sum(torch.abs(torch.diff(torch.sign(waveform)))).item()
-        zcr = zero_crossings / waveform.shape[1]
-        
-        # Amplitude variation
-        amplitude_std = torch.std(waveform).item()
-        
-        # Short-term energy variation (indicates natural speech patterns)
-        frame_size = int(0.025 * self.sample_rate)  # 25ms frames
-        frames = waveform.unfold(1, frame_size, frame_size // 2)
-        frame_energies = torch.sum(frames ** 2, dim=2)
-        energy_variance = torch.var(frame_energies).item()
-        
-        logger.info(f"Audio features - Duration: {duration:.2f}s, Avg Energy: {avg_energy:.6f}, "
-                   f"ZCR: {zcr:.6f}, Amp Std: {amplitude_std:.6f}, Energy Var: {energy_variance:.6f}")
-        
-        return {
-            'duration': duration,
-            'avg_energy': avg_energy,
-            'zero_crossing_rate': zcr,
-            'amplitude_std': amplitude_std,
-            'energy_variance': energy_variance
-        }
-    
-    def detect_amd(self, waveform: torch.Tensor) -> tuple[str, float]:
-        """
-        Detect if audio is human or machine
-        Returns: (prediction: 'human'|'machine', confidence: float)
-        """
-        features = self.analyze_audio_features(waveform)
-        
-        # Heuristic-based detection
-        # Machines typically have:
-        # - More consistent energy (lower variance)
-        # - More monotone (lower zero crossing rate variation)
-        # - More uniform amplitude
-        
-        score = 0.0
-        confidence_factors = []
-        
-        # Factor 1: Energy variance (humans have more variation)
-        if features['energy_variance'] > 0.001:
-            score += 0.3
-            confidence_factors.append("High energy variation")
-        else:
-            confidence_factors.append("Low energy variation")
-        
-        # Factor 2: Zero crossing rate (humans have more varied speech)
-        if features['zero_crossing_rate'] > 0.1:
-            score += 0.3
-            confidence_factors.append("Varied speech patterns")
-        else:
-            confidence_factors.append("Monotone speech")
-        
-        # Factor 3: Amplitude variation (humans have more dynamic range)
-        if features['amplitude_std'] > 0.05:
-            score += 0.2
-            confidence_factors.append("Dynamic amplitude")
-        else:
-            confidence_factors.append("Flat amplitude")
-        
-        # Factor 4: Duration analysis (machines often have longer monotone sections)
-        if features['duration'] < 3.0 and features['avg_energy'] > 0.001:
-            score += 0.2
-            confidence_factors.append("Short natural greeting")
-        
-        # Determine prediction
-        prediction = 'human' if score > 0.5 else 'machine'
-        confidence = score if prediction == 'human' else (1.0 - score)
-        
-        # Ensure confidence is in reasonable range
-        confidence = max(0.6, min(0.95, confidence))
-        
-        logger.info(f"AMD Detection: {prediction} (confidence: {confidence:.2f}) - "
-                   f"Factors: {', '.join(confidence_factors)}")
-        
-        return prediction, confidence
-
-# Initialize processor
-processor = AudioProcessor()
-
 class AMDResponse(BaseModel):
     result: str  # 'human' or 'machine'
     confidence: float
     duration: float
+    processing_time: float
+    method: str
     features: dict
+
+class AudioAnalyzer:
+    """Analyzes audio features for AMD detection"""
+    
+    @staticmethod
+    def analyze_audio(audio_data: bytes) -> tuple[str, float, dict]:
+        """
+        Analyze audio to detect human vs machine
+        Returns: (prediction, confidence, features)
+        """
+        try:
+            # Try to parse as WAV file
+            with wave.open(io.BytesIO(audio_data), 'rb') as wav:
+                frames = wav.readframes(wav.getnframes())
+                sample_rate = wav.getframerate()
+                n_channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                
+                # Convert to numpy array
+                if sample_width == 1:
+                    dtype = np.uint8
+                    audio_array = np.frombuffer(frames, dtype=dtype).astype(np.float32) / 128.0 - 1.0
+                elif sample_width == 2:
+                    dtype = np.int16
+                    audio_array = np.frombuffer(frames, dtype=dtype).astype(np.float32) / 32768.0
+                elif sample_width == 4:
+                    dtype = np.int32
+                    audio_array = np.frombuffer(frames, dtype=dtype).astype(np.float32) / 2147483648.0
+                else:
+                    raise ValueError(f"Unsupported sample width: {sample_width}")
+                
+                # If stereo, convert to mono
+                if n_channels == 2:
+                    audio_array = audio_array.reshape(-1, 2).mean(axis=1)
+        
+        except Exception as e:
+            logger.warning(f"Failed to parse as WAV: {e}, trying MP3 conversion with pydub")
+            # Try to convert MP3/other formats using pydub
+            try:
+                # Load audio with pydub (supports MP3, M4A, OGG, etc.)
+                audio = AudioSegment.from_file(io.BytesIO(audio_data))
+                
+                # Convert to mono if stereo
+                if audio.channels > 1:
+                    audio = audio.set_channels(1)
+                
+                # Set sample rate to 8kHz (telephony standard)
+                audio = audio.set_frame_rate(8000)
+                
+                # Convert to 16-bit PCM
+                audio = audio.set_sample_width(2)
+                
+                # Get raw audio data
+                raw_data = audio.raw_data
+                audio_array = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+                sample_rate = audio.frame_rate
+                
+                logger.info(f"Successfully converted audio to WAV using pydub (format detected, {len(audio_array)} samples, {sample_rate}Hz)")
+                
+            except Exception as pydub_error:
+                logger.error(f"pydub conversion failed: {pydub_error}")
+                raise Exception(f"Cannot parse audio in any format (tried WAV, pydub conversion): {pydub_error}")
+        
+        duration = len(audio_array) / sample_rate
+        
+        # Calculate audio features
+        features = AudioAnalyzer._calculate_features(audio_array, sample_rate)
+        
+        # Decision logic
+        prediction, confidence = AudioAnalyzer._make_prediction(features)
+        
+        logger.info(f"Analysis complete: {prediction} ({confidence:.2f}) - Duration: {duration:.2f}s")
+        
+        return prediction, confidence, {**features, 'duration': duration, 'sample_rate': sample_rate}
+    
+    @staticmethod
+    def _calculate_features(audio: np.ndarray, sample_rate: int) -> dict:
+        """Calculate audio features for AMD detection"""
+        
+        # 1. Energy analysis
+        total_energy = float(np.sum(audio ** 2))
+        mean_energy = total_energy / len(audio)
+        
+        # 2. Zero Crossing Rate (ZCR) - indicates speech variability
+        zero_crossings = np.sum(np.abs(np.diff(np.sign(audio)))) / 2
+        zcr = float(zero_crossings / len(audio))
+        
+        # 3. Amplitude statistics
+        amplitude_mean = float(np.mean(np.abs(audio)))
+        amplitude_std = float(np.std(audio))
+        amplitude_max = float(np.max(np.abs(audio)))
+        
+        # 4. Short-term energy variation (frame-based analysis)
+        frame_length = int(0.025 * sample_rate)  # 25ms frames
+        hop_length = int(0.010 * sample_rate)     # 10ms hop
+        
+        frame_energies = []
+        silence_frames = 0
+        total_frames = 0
+        
+        silence_threshold = mean_energy * 0.05  # 5% of mean energy
+        
+        for i in range(0, len(audio) - frame_length, hop_length):
+            frame = audio[i:i + frame_length]
+            frame_energy = np.sum(frame ** 2)
+            frame_energies.append(frame_energy)
+            total_frames += 1
+            
+            if frame_energy < silence_threshold:
+                silence_frames += 1
+        
+        energy_variance = float(np.var(frame_energies)) if frame_energies else 0.0
+        energy_std = float(np.std(frame_energies)) if frame_energies else 0.0
+        silence_ratio = silence_frames / total_frames if total_frames > 0 else 0.0
+        
+        # 5. Speech pauses detection (longer silences)
+        long_silence_threshold = int(0.5 * sample_rate)  # 500ms
+        in_silence = False
+        silence_count = 0
+        pause_count = 0
+        
+        for sample in audio:
+            if abs(sample) < (amplitude_mean * 0.1):
+                silence_count += 1
+                if silence_count >= long_silence_threshold and not in_silence:
+                    pause_count += 1
+                    in_silence = True
+            else:
+                silence_count = 0
+                in_silence = False
+        
+        return {
+            'mean_energy': mean_energy,
+            'zero_crossing_rate': zcr,
+            'amplitude_mean': amplitude_mean,
+            'amplitude_std': amplitude_std,
+            'amplitude_max': amplitude_max,
+            'energy_variance': energy_variance,
+            'energy_std': energy_std,
+            'silence_ratio': silence_ratio,
+            'pause_count': pause_count,
+        }
+    
+    @staticmethod
+    def _make_prediction(features: dict) -> tuple[str, float]:
+        """
+        Make AMD prediction based on features
+        
+        Answering machines typically exhibit:
+        - Higher silence ratio at start (waiting for beep)
+        - More monotone speech (lower energy variance)
+        - More consistent amplitude
+        - Fewer natural pauses
+        - More consistent zero crossing rate
+        """
+        
+        human_score = 0.0
+        confidence_factors = []
+        
+        # Factor 1: Energy variation (humans have more varied energy)
+        if features['energy_variance'] > 0.002:
+            human_score += 0.25
+            confidence_factors.append("high_energy_variation")
+        
+        # Factor 2: Natural speech patterns (ZCR in natural range)
+        if 0.08 < features['zero_crossing_rate'] < 0.15:
+            human_score += 0.20
+            confidence_factors.append("natural_speech_pattern")
+        
+        # Factor 3: Amplitude variation (humans have dynamic range)
+        if features['amplitude_std'] > 0.1:
+            human_score += 0.20
+            confidence_factors.append("dynamic_amplitude")
+        
+        # Factor 4: Natural pauses (humans have more conversational pauses)
+        if features['pause_count'] >= 1:
+            human_score += 0.15
+            confidence_factors.append("natural_pauses")
+        
+        # Factor 5: Low silence ratio (humans speak more naturally)
+        if features['silence_ratio'] < 0.3:
+            human_score += 0.20
+            confidence_factors.append("low_silence")
+        
+        # Determine prediction
+        is_human = human_score > 0.5
+        confidence = human_score if is_human else (1.0 - human_score)
+        
+        # Adjust confidence to reasonable range (60% - 95%)
+        confidence = max(0.60, min(0.95, 0.60 + (confidence * 0.35)))
+        
+        prediction = 'human' if is_human else 'machine'
+        
+        logger.info(f"Prediction: {prediction}, Confidence: {confidence:.2f}, "
+                   f"Factors: {', '.join(confidence_factors)}, Score: {human_score:.2f}")
+        
+        return prediction, confidence
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
+    """Service info endpoint"""
     return {
-        "service": "AMD Hugging Face Service",
+        "service": "AMD Hugging Face Service (Simplified)",
+        "version": "1.0.0",
         "status": "running",
-        "model": MODEL_NAME,
-        "device": str(processor.device)
+        "method": "signal_processing_heuristics",
+        "endpoints": {
+            "/": "Service info",
+            "/health": "Health check",
+            "/detect": "POST audio file for AMD detection"
+        }
     }
 
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "service": "amd-huggingface",
+        "method": "signal_processing"
+    }
 
 @app.post("/detect", response_model=AMDResponse)
 async def detect_amd(audio: UploadFile = File(...)):
@@ -171,48 +264,44 @@ async def detect_amd(audio: UploadFile = File(...)):
     Detect if audio contains human or machine speech
     
     Args:
-        audio: Audio file (WAV, MP3, etc.)
+        audio: Audio file (WAV, raw PCM, etc.)
     
     Returns:
         AMDResponse with detection result and confidence
     """
+    start_time = time.time()
+    
     try:
-        logger.info(f"Processing audio file: {audio.filename}")
+        logger.info(f"Processing audio file: {audio.filename}, Content-Type: {audio.content_type}")
         
         # Read audio file
         audio_bytes = await audio.read()
+        logger.info(f"Audio size: {len(audio_bytes)} bytes")
         
-        # Load audio with torchaudio
-        waveform, sample_rate = torchaudio.load(io.BytesIO(audio_bytes))
+        # Analyze audio
+        result, confidence, features = AudioAnalyzer.analyze_audio(audio_bytes)
         
-        logger.info(f"Audio loaded - Sample rate: {sample_rate}, Shape: {waveform.shape}")
-        
-        # Resample if necessary
-        if sample_rate != SAMPLE_RATE:
-            resampler = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)
-            waveform = resampler(waveform)
-            logger.info(f"Resampled to {SAMPLE_RATE}Hz")
-        
-        # Detect AMD
-        result, confidence = processor.detect_amd(waveform)
-        
-        # Get features for response
-        features = processor.analyze_audio_features(waveform)
+        processing_time = time.time() - start_time
         
         response = AMDResponse(
             result=result,
             confidence=confidence,
-            duration=features['duration'],
+            duration=features.get('duration', 0.0),
+            processing_time=processing_time,
+            method="signal_processing_heuristics",
             features=features
         )
         
-        logger.info(f"Detection complete: {result} ({confidence:.2f})")
+        logger.info(f"Detection complete: {result} ({confidence:.2f}) in {processing_time:.3f}s")
         
         return response
         
     except Exception as e:
         logger.error(f"Error processing audio: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing audio: {str(e)}"
+        )
 
 @app.post("/detect-url")
 async def detect_amd_from_url(url: str):
@@ -227,39 +316,117 @@ async def detect_amd_from_url(url: str):
     """
     import httpx
     
+    start_time = time.time()
+    
     try:
         logger.info(f"Downloading audio from URL: {url}")
         
         async with httpx.AsyncClient() as client:
             response = await client.get(url)
             response.raise_for_status()
-            
             audio_bytes = response.content
-            
-        # Load audio
-        waveform, sample_rate = torchaudio.load(io.BytesIO(audio_bytes))
         
-        # Resample if necessary
-        if sample_rate != SAMPLE_RATE:
-            resampler = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)
-            waveform = resampler(waveform)
+        logger.info(f"Downloaded {len(audio_bytes)} bytes")
         
-        # Detect AMD
-        result, confidence = processor.detect_amd(waveform)
-        features = processor.analyze_audio_features(waveform)
+        # Analyze audio
+        result, confidence, features = AudioAnalyzer.analyze_audio(audio_bytes)
+        
+        processing_time = time.time() - start_time
         
         return AMDResponse(
             result=result,
             confidence=confidence,
-            duration=features['duration'],
+            duration=features.get('duration', 0.0),
+            processing_time=processing_time,
+            method="signal_processing_heuristics",
             features=features
         )
         
     except Exception as e:
-        logger.error(f"Error downloading/processing audio from URL: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing audio URL: {str(e)}")
+        logger.error(f"Error downloading/processing audio from URL: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing audio URL: {str(e)}"
+        )
+
+class AnalyzeRequest(BaseModel):
+    recording_url: str
+    twilio_account_sid: str = None
+    twilio_auth_token: str = None
+
+@app.post("/analyze")
+async def analyze_recording(request: AnalyzeRequest):
+    """
+    Analyze Twilio recording URL with authentication
+    Expected by recordingAnalyzer.ts
+    
+    Args:
+        request: Contains recording_url and optional Twilio credentials
+    
+    Returns:
+        { result, confidence, prediction, score, features }
+    """
+    import httpx
+    import base64
+    
+    start_time = time.time()
+    
+    try:
+        logger.info(f"Analyzing recording from: {request.recording_url}")
+        
+        # Prepare headers with authentication if provided
+        headers = {}
+        if request.twilio_account_sid and request.twilio_auth_token:
+            auth_string = f"{request.twilio_account_sid}:{request.twilio_auth_token}"
+            auth_bytes = auth_string.encode('utf-8')
+            auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+            headers['Authorization'] = f'Basic {auth_b64}'
+            logger.info("Using Twilio authentication")
+        
+        # Download audio
+        async with httpx.AsyncClient() as client:
+            response = await client.get(request.recording_url, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            audio_bytes = response.content
+        
+        logger.info(f"Downloaded {len(audio_bytes)} bytes")
+        
+        # Analyze audio
+        result, confidence, features = AudioAnalyzer.analyze_audio(audio_bytes)
+        
+        processing_time = time.time() - start_time
+        
+        # Return in format expected by recordingAnalyzer.ts
+        return {
+            "result": result,  # 'human' or 'machine'
+            "confidence": confidence,  # 0.0 - 1.0
+            "prediction": result,  # Alias for compatibility
+            "score": confidence,  # Alias for compatibility
+            "duration": features.get('duration', 0.0),
+            "processing_time": processing_time,
+            "method": "signal_processing_heuristics",
+            "features": features
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing recording: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error analyzing recording: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
+    import os
+    
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    
+    print("\n" + "="*60)
+    print("🚀 AMD Hugging Face Service (Simplified)")
+    print("="*60)
+    print(f"📡 Server: http://localhost:{port}")
+    print(f"📖 API Docs: http://localhost:{port}/docs")
+    print(f"🔍 Method: Signal Processing Heuristics")
+    print("="*60 + "\n")
+    
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

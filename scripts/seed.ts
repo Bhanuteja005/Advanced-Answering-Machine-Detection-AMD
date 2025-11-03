@@ -16,7 +16,7 @@ async function main() {
     update: {},
     create: {
       email: 'test@example.com',
-      supabaseId: 'test-supabase-id-123',
+      name: 'Test User',
     },
   });
 
@@ -83,8 +83,7 @@ async function main() {
   console.log(`✓ Created ${calls.length} sample call logs`);
   console.log('\nSeed data:');
   console.log('- Email: test@example.com');
-  console.log('- Note: Use Supabase dashboard to set password for this email');
-  console.log('- Or sign up through the app with this email');
+  console.log('- Note: Sign in with Google OAuth through the app');
 }
 
 main()

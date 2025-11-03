@@ -62,35 +62,36 @@ export async function startPolling(twilioSid: string, callLogId: string) {
       
       // Only set AMD result for Twilio native strategy
       if (callLog && callLog.strategy === 'twilio' && call.answeredBy) {
-        // Only update if we have a meaningful result (not 'unknown')
-        if (call.answeredBy !== 'unknown') {
-          updateData.amdResult = call.answeredBy;
-          
-          // Calculate confidence based on various factors
-          let confidence = 0.80;
-          
-          // Twilio native AMD confidence scoring
-          if (call.answeredBy === 'human') {
-            confidence = 0.85; // High confidence for human
-          } else if (call.answeredBy === 'machine_start' || call.answeredBy === 'machine_end_beep') {
-            confidence = 0.90; // Very high confidence for machine
-          } else if (call.answeredBy === 'fax') {
-            confidence = 0.95; // Very high confidence for fax
-          }
-          
-          updateData.confidence = confidence;
-
-          logger.info('AMD result detected (Twilio Native)', {
-            twilioSid,
-            amdResult: call.answeredBy,
-            confidence,
-          });
-        } else {
+        const answeredByLower = call.answeredBy.toLowerCase();
+        
+        // Always update AMD result, even if 'unknown'
+        updateData.amdResult = answeredByLower;
+        
+        // Calculate confidence based on result type
+        let confidence = 0.80;
+        
+        // Twilio native AMD confidence scoring
+        if (answeredByLower === 'human') {
+          confidence = 0.85; // High confidence for human
+        } else if (answeredByLower === 'machine_start' || answeredByLower === 'machine_end_beep') {
+          confidence = 0.90; // Very high confidence for machine
+        } else if (answeredByLower === 'fax') {
+          confidence = 0.95; // Very high confidence for fax
+        } else if (answeredByLower === 'unknown') {
+          confidence = 0.50; // Low confidence for unknown
           logger.warn('Twilio returned unknown AMD result - call may have been too short', {
             twilioSid,
             duration: call.duration,
           });
         }
+        
+        updateData.confidence = confidence;
+
+        logger.info('AMD result detected (Twilio Native)', {
+          twilioSid,
+          amdResult: answeredByLower,
+          confidence,
+        });
       }
 
       // Update database

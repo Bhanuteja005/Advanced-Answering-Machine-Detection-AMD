@@ -1,13 +1,10 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono } from "next/font/google";
 import "./globals.css";
-import Header from "@/components/Header";
+import AppHeader from "@/components/AppHeader";
 import { QueryProvider } from "@/components/QueryProvider";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+import { Toaster } from "sonner";
+import { aeonik } from "@/utils/constants/fonts";
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
@@ -25,13 +22,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning className="scrollbar">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-zinc-50 dark:bg-black`}
+        className={`${aeonik.variable} ${geistMono.variable} min-h-screen bg-background text-foreground antialiased font-sans overflow-x-hidden`}
       >
         <QueryProvider>
-          <Header />
+          <AppHeader />
           {children}
+          <Toaster richColors closeButton position="top-right" theme="dark" />
         </QueryProvider>
       </body>
     </html>
